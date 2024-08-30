@@ -6,6 +6,7 @@ build the circuit to transform egocentric sensory inputs into allocentric inputs
 2. integrate egocenric object vector representation and 
 
 """
+import time
 
 import torch 
 import torch.nn as nn 
@@ -16,7 +17,7 @@ from torchdiffeq import odeint
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-class GridModel(nn.Module):
+class GridModel_F(nn.Module):
     # 似乎没有任何地方可以公用num_module的状态，所以写开也许更好
     def __init__(self, config):
         super().__init__()
@@ -74,7 +75,7 @@ class GridModel(nn.Module):
         # initialize conn matrix
         self.conn_mat = self.make_conn()
         self.conn_out = self.make_conn_out()
-        self.conn_out = self.norm_fac * normalize_rows(self.conn_out)
+        self.conn_out = self.norm_fac * normalize_rows(self.conn_out, dim=2)
         self.conn_in = torch.zeros([self.num_module, self.num, self.num_hpc]).to(device)
 
         # initialize dynamical variables
@@ -111,9 +112,10 @@ class GridModel(nn.Module):
         return dis
 
     def make_conn_out(self):
-        matrix = torch.randn((self.num_hpc, self.num)).to(device) * 0.01
-        random_indices = torch.randint(self.num, size=(self.num_hpc,)).to(device)
-        matrix[torch.LongTensor(np.arange(self.num_hpc)), random_indices] = 1
+        matrix = torch.randn((self.num_module, self.num_hpc, self.num)).to(device) * 0.01
+        for i in range(self.num_module):
+            random_indices = torch.randint(self.num, size=(self.num_hpc,)).to(device)
+            matrix[i, torch.LongTensor(np.arange(self.num_hpc)), random_indices] = 1
         return matrix
 
     def make_conn(self):
@@ -172,16 +174,16 @@ class GridModel(nn.Module):
     def conn_out_update(self, r_learn_hpc):
         r_learn = r_learn_hpc  # .reshape(-1, 1)
         r_grid = self.r  # .reshape(-1, 1)
-        print("check r shape", r_learn.shape, r_grid.shape)
-        corr_out = torch.outer(r_learn, r_grid)
-        conn_out = self.conn_out + (self.lr_out * corr_out* self.conn_out) / self.tau_W_out * self.config.dt
+        corr_out = torch.einsum('i,bj->bij', r_learn, r_grid)
+        # corr_out = torch.outer(r_learn, r_grid)
+        conn_out = self.conn_out + (self.lr_out * corr_out * self.conn_out) / self.tau_W_out * self.config.dt
         conn_out = torch.where(conn_out>-0.1, conn_out, -0.1)
         # TODO 或需要测试ratio更好还是1.5~11的strength更好
-        self.conn_out = self.norm_fac * normalize_rows(conn_out) * np.exp(-self.ratios**2/5**2)
+        self.conn_out = self.norm_fac * normalize_rows(conn_out, dim=2) * torch.exp(-self.ratios**2/5**2).unsqueeze(1).unsqueeze(2)
 
     def conn_in_update(self, r_hpc, thres=3.5):
         r_hpc = r_hpc.reshape(-1, 1)
-        r_grid = self.r.reshape(-1, 1)
+        r_grid = self.r.reshape(self.num_module, -1, 1)
         r_hpc = torch.where(r_hpc>thres, r_hpc, 0)
         r_grid = torch.where(r_grid>0.08, r_grid, 0)
         input_hpc = torch.matmul(self.conn_in, r_hpc)
@@ -211,7 +213,7 @@ class GridModel(nn.Module):
 
     def update(self, pos, velocity, r_hpc, shared_t, hpc2mec_stre=0., train=0, get_loc=1):
         self.get_center()
-        print(self.center, self.centerI, self.center_ideal)
+        print(self.center[0], self.centerI[0])
         v_rot = torch.matmul(self.rot, velocity)
         v_phase = torch.matmul(v_rot * self.pos2phase_constant, self.coor_transform)
         center_i = self.center_ideal + v_phase * self.config.dt
@@ -251,10 +253,13 @@ if __name__ == '__main__':
     from model_config import ConfigParam, Env
     env = Env()
     config = ConfigParam(env)
-    model = GridModel(config=config).to(device)
-    pos = torch.arange(10).unsqueeze(1).repeat((1,2)).to(device) * 0.1
-    vel = torch.ones((10,2)).to(device)*0.1
-    r_hpc = torch.randn((10, config.num_hpc)).to(device)
-    shared_ts = torch.arange(11).to(device) * 0.1
-    for i in range(10):
+    model = GridModel_F(config=config).to(device)
+    T = 1000
+    pos = torch.arange(T).unsqueeze(1).repeat((1,2)).to(device) * 0.1
+    vel = torch.ones((T,2)).to(device)*0.1
+    r_hpc = torch.randn((T, config.num_hpc)).to(device)
+    shared_ts = torch.arange(T+1).to(device) * 0.1
+    t0 = time.time()
+    for i in range(T):
         model.update(pos[i], vel[i], r_hpc[i], shared_ts[i:i+2], train=1)
+    print("using ", time.time() - t0)

@@ -45,24 +45,26 @@ def keep_top_n(mat, n):
     return mask
 
 
-def normalize_rows(matrix):
-    column_sums = torch.sum(matrix, dim=1)
+def normalize_rows(matrix, dim=1):
+    ori_shape = [1]*len(matrix.shape)
+    ori_shape[dim] = matrix.shape[dim]
+    column_sums = torch.sum(matrix, dim=dim, keepdim=True).repeat(ori_shape)
     nonzero_mask = (column_sums != 0)
     normalized_matrix = matrix.clone()
-    normalized_matrix[nonzero_mask] = matrix[nonzero_mask] / column_sums[nonzero_mask][:, None]
+    normalized_matrix[nonzero_mask] = matrix[nonzero_mask] / column_sums[nonzero_mask]
     return normalized_matrix
 
 
 def place_cell_select_fr(HPC_fr, thres=0.002):
     # HPC_fr = HPC_fr
     max_fr = np.max(HPC_fr, axis=0)
-    place_index = np.argwhere(max_fr > thres)
+    place_index = np.argwhere(max_fr > thres)  # 只要发放最大的时候超过了阈值，就被选作place cell
     place_num = place_index.shape[0]
     return max_fr, place_index, place_num
 
 
 def place_center(HPC_fr, place_index, loc):
-    # 根据最大发放计算place center
+    # 根据最大发放计算place center, 一个cell的center由它发放最大时刻的traj真实loc决定
     place_num = int(place_index.shape[0])
     Center = np.zeros([place_num, 2])
     fr_probe = HPC_fr[:,place_index.reshape(-1,)]
@@ -70,6 +72,18 @@ def place_center(HPC_fr, place_index, loc):
         max_time = np.argmax(fr_probe[:,i],axis=0)
         Center[i,:] = loc[max_time,:]
     return Center
+
+
+def get_center_hpc(fr, center_x, center_y, thres=0.2):
+    # max_values = fr.max(axis=1).reshape(-1, 1)
+    max_index = np.argmax(fr, axis=1)
+    T = fr.shape[0]
+    Cx = np.zeros(T,)
+    Cy = np.zeros(T,)
+    for i in range(T):
+        Cx[i] = center_x[max_index[i]]
+        Cy[i] = center_y[max_index[i]]
+    return Cx, Cy
 
 
 class Lambda(torch.nn.Module):
@@ -90,19 +104,8 @@ class Lambda(torch.nn.Module):
 #     return torch.mm(y ** 3, true_A)
 # def derivate()
 
-if __name__ == '__main__':
-    from torchdiffeq import odeint
-    u0 = torch.tensor([[0., 0.]])
-    v0 = torch.tensor([[-0., 0.]])
-    # true_y0 = torch.tensor([[2., 0.]])
-    t = torch.linspace(0., 25., 100)
-    true_A = torch.tensor([[-0.1, 2.0], [-2.0, -0.1]])
 
-    true_y0 = torch.stack([u0,v0])
-    with torch.no_grad():
-        true_y = odeint(Lambda(), true_y0, torch.Tensor([0,0.1]))
-    # t = torch.linspace(0., 25., 100)
-    # with torch.no_grad():
-    #     true_y = odeint(Lambda, true_y0, t, method='dopri5')
-    print(true_y)
-    # print(true_y0 + torch.mm(true_y0 ** 3, true_A)*0.25)
+if __name__ == '__main__':
+    a = torch.randn((2,2,5))
+    norm_a = normalize_rows(a, dim=2)
+    print(a, norm_a)

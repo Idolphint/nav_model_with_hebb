@@ -1,3 +1,5 @@
+import time
+
 import torch
 import numpy as np
 from util import *
@@ -11,7 +13,9 @@ class Coupled_Net_HHG(torch.nn.Module):
         self.config = config
         self.HPC_model = HPC_model
         self.HD_net = HD_net
-        self.MEC_model_list = MEC_model_list
+        self.MEC_model_list = torch.nn.ModuleList()   #MEC_model_list
+        for each_model in MEC_model_list:
+            self.MEC_model_list.append(each_model)
         self.num_module = config.num_mec_module
 
         self.num_sen = config.OVC["N_dis"] * config.OVC["N_theta"] * config.env.loc_land.shape[0]
@@ -51,7 +55,7 @@ class Coupled_Net_HHG(torch.nn.Module):
         # Update MEC states
         r_hpc = self.HPC_model.r
         I_mec = torch.zeros(self.HPC_model.num, ).to(device)
-
+        t0 = time.time()
         for i in range(self.num_module):
             MEC_model = self.MEC_model_list[i]
             MEC_model.update(pos=loc, velocity=velocity, r_hpc=r_hpc, shared_t=shared_t,
@@ -64,7 +68,8 @@ class Coupled_Net_HHG(torch.nn.Module):
             input_hpc = torch.matmul(MEC_model.conn_in, r_hpc) - 0.1  # 从hpc输入到MEC的量
             input_hpc = torch.where(input_hpc > 0, input_hpc, 0)
             self.input_hpc_module[:, i] = input_hpc
-
+        print("MEC update using", time.time() - t0)
+        t0 = time.time()
         I_mec = torch.where(I_mec > 0, I_mec, 0)
         # Update HD cells states
         r_lb = landmark_bearing(loc=loc, HD_vec=HD_gt, loc_land=self.config.env.global_land)
@@ -73,7 +78,8 @@ class Coupled_Net_HHG(torch.nn.Module):
                            shared_t=shared_t, get_HD=get_HD,
                            sen2HD_stre=self.sen2HD_stre, train=train)
         HD_direction = self.HD_net.center
-
+        print("HD update using", time.time()-t0)
+        t0 = time.time()
         # Update Sensory inputs
 
         view_size = 2 / 3 * np.pi if get_view == 1 else 2 * np.pi
@@ -92,3 +98,5 @@ class Coupled_Net_HHG(torch.nn.Module):
         self.I_sen = torch.matmul(self.HPC_model.W_sen, r_sen) * self.sen2hpc_stre  # I_sen是经过HPC输入权重调制的
         # Update Hippocampus states
         self.HPC_model.update(I_mec=self.I_mec, I_sen=self.I_sen, I_OVCs=I_OVCs.flatten(), shared_t=shared_t, train=train)
+        print("HPC update using", time.time()-t0)
+        t0 = time.time()

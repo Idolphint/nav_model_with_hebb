@@ -3,7 +3,7 @@ Construct a HD-OVC circuit model that converts egocentric sensory inputs into al
 
 1. Convert egocentric sensory inputs into a egocentric object vector representation.
 2. Merge the egocentric object vector representation with the head direction representation to generate an allocentric object vector representation.
-
+通过维护一个巨大的表格hpc_num, ego_hD_num, allo_HD_num, 记录在具体的地点当ego_HD为某个值时，对应的allo_HD该是什么？
 """
 import torch
 import torch.nn as nn
@@ -16,7 +16,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class HdOVCModel(nn.Module):
-
     def __init__(self, config, sample_place_num=2000):
         super().__init__()
         self.config = config
@@ -52,18 +51,18 @@ class HdOVCModel(nn.Module):
         # connection matrix
         conn_mat = self.make_conn()
         self.conn_fft = torch.fft.fft(conn_mat)  # 1d fft
-        self.conn_bearing = torch.zeros([self.sample_place_cell_num, self.num, self.num_land]).to(device) + torch.abs(
-            torch.randn((self.sample_place_cell_num, self.num, self.num_land)) * 0.1).to(device)
+        self.conn_bearing = nn.Parameter(torch.zeros([self.sample_place_cell_num, self.num, self.num_land]).to(device) + torch.abs(
+            torch.randn((self.sample_place_cell_num, self.num, self.num_land)) * 0.1).to(device))
 
         # neuron state variables
-        self.r = torch.zeros(self.num).to(device)
-        self.u = torch.zeros(self.num).to(device)  # head direction cell
-        self.v = torch.zeros(self.num).to(device)
+        self.r = nn.Parameter(torch.zeros(self.num).to(device))
+        self.u = nn.Parameter(torch.zeros(self.num).to(device))  # head direction cell
+        self.v = nn.Parameter(torch.zeros(self.num).to(device))
         self.input_bearing = torch.zeros(self.num).to(device)
         self.input_total = torch.zeros(self.num).to(device)
-        self.u_place = torch.zeros(self.sample_place_cell_num).to(device)  # place cell
+        # self.u_place = torch.zeros(self.sample_place_cell_num).to(device)  # place cell
         self.r_place = torch.zeros(self.sample_place_cell_num).to(device)  # place cell
-        self.u_bearing = torch.zeros([self.num_land]).to(device)  # conjunctive cell
+        # self.u_bearing = torch.zeros([self.num_land]).to(device)  # conjunctive cell
         self.index = torch.arange(self.sample_place_cell_num).to(device)
 
         # other variables
@@ -125,31 +124,43 @@ class HdOVCModel(nn.Module):
             print("ideal a, cal a=", hd, center)
 
     def conn_update(self, r_bearing, index):
-        # 让r_bearing和学习到的量保持一致，但是全局的HD怎么能用角速度积分呢？
+        # 让r_bearing(相对固定global landmark的角度)和学习到的量保持一致
         conn_bearing_update = self.conn_bearing[index]  # Activate only one group
-        r_hd = self.r * (1 + torch.abs(torch.randn((self.num,)) * 0.01))
+        r_hd = self.r * (1 + torch.abs(torch.randn((self.num,)).to(device) * 0.01))
         ####### Competitive Hebbian learning
         r_learn_hd = keep_top_n(r_hd, self.spike_num)
-        r_bearing = r_bearing + torch.abs(torch.randn((self.num_land,)) * 0.01)
+        r_bearing = r_bearing + torch.abs(torch.randn((self.num_land,)).to(device) * 0.01)
         corr_bearing = torch.outer(r_learn_hd, r_bearing)
         d_bearing = (self.lr * corr_bearing * conn_bearing_update) / self.tau_conn * self.config.dt
         conn_bearing = conn_bearing_update + d_bearing
-        self.conn_bearing[index] = self.norm_fac_HD * normalize_rows(conn_bearing)
+        self.conn_bearing.data[index] = self.norm_fac_HD * normalize_rows(conn_bearing)
 
     def reset_state(self, HD_truth):
-        self.r = torch.zeros(self.num).to(device)
-        self.u = torch.zeros(self.num).to(device)  # head direction cell
-        self.v = torch.zeros(self.num).to(device)
+        self.r.data = torch.zeros(self.num).to(device)
+        self.u.data = torch.zeros(self.num).to(device)  # head direction cell
+        self.v.data = torch.zeros(self.num).to(device)
         self.motion_input = torch.zeros(self.num).to(device)
         self.center = torch.tensor(HD_truth).to(device)
         self.center_ideal = torch.zeros(1).to(device)
         self.pos_estimate = torch.zeros(1).to(device)
 
     def update(self, angular_velocity, HD, r_hpc, r_bearing, shared_t, sen2HD_stre, get_HD=0, noise_stre=0., train=0):
+        """
+        :param angular_velocity:
+        :param HD:
+        :param r_hpc: 难道是被排序的最高相应的hpc吗，否则怎么能只用前2000个呢？
+        :param r_bearing: 相对global lndmark的角度[30]
+        :param shared_t:
+        :param sen2HD_stre:
+        :param get_HD:
+        :param noise_stre:
+        :param train:
+        :return:
+        """
         # Calculate all inputs
         # Calculate path-integrate input
         self.center = self.get_center(r=self.r, x=self.x)  # 适用所有头朝向细胞计算出的波包中心,x代表每一位实际指代的角度是谁，r代表每一位的实际发放情况
-        # print("after get center", self.center, self.r)
+        # print("HD get center", self.center)
         self.self_motion_integrate(angular_velocity, noise_stre)
         input_HD = self.input_HD(HD)  # 计算head direction映射到128维分量的值,这里是精确值
         if get_HD == 1:
@@ -179,11 +190,11 @@ class HdOVCModel(nn.Module):
         u = solution[1, 0]  # 如果t是[n,]那么solution[n,2]一般n=1
         v = solution[1, 1]
         # u, v = self.integral(self.u, self.v, bp.share.load('t'), input_total, self.config.dt)
-        self.u = torch.where(u > 0, u, 0)
-        self.v = v
+        self.u.data = torch.where(u > 0, u, 0)
+        self.v.data = v
         r1 = torch.square(self.u)
         r2 = 1.0 + self.k * torch.sum(r1)
-        self.r = r1 / r2
+        self.r.data = r1 / r2
         # print("check after odient", self.r)
         if train == 2:
             # self.conn_update(r_bearing, top_n_indices)
@@ -258,6 +269,7 @@ def sens2egoOVC(config, loc_gt, HD_gt, HD_signal, agent_view=2 / 3 * torch.pi):
 
     # I_allo = torch.Tensor(I_allo).to(device)
     # I_ego = torch.Tensor(I_ego).to(device)
+    # 确实可能存在盲区，导致ovc的输入全为0
     return I_allo, I_ego
 
 
